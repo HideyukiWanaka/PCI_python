@@ -12,6 +12,8 @@ import numpy as np
 import matplotlib.pyplot as plt
 import matplotlib.font_manager as fm
 from pathlib import Path
+import tkinter as tk
+from tkinter import simpledialog, messagebox, Toplevel, Frame, Label, Entry, Button, BOTH, W, LEFT
 
 # --- 解析実行のための設定 ---
 # ★★★ これらの設定値は必要に応じて変更してください ★★★
@@ -30,7 +32,7 @@ LEFT_PREFIX = 'L'                 # 左センサーのプレフィックス
 TRUNK_PREFIX = 'T'                # 体幹センサーのプレフィックス (列名設定用)
 
 # find_peaks のデフォルトパラメータ (ユーザー入力用)
-DEFAULT_PEAK_HEIGHT = 0.5         # ★グラフを見て調整★
+DEFAULT_PEAK_HEIGHT = 10         # ★グラフを見て調整★
 DEFAULT_PEAK_PROMINENCE = 0.3     # ★グラフを見て調整★
 DEFAULT_PEAK_DISTANCE = 50        # ★グラフを見て調整★
 NUM_SAMPLES_TO_PLOT = 1000        # 初期プロットで表示するサンプル数
@@ -43,6 +45,107 @@ try:
     plt.rcParams['font.sans-serif'] = ['Hiragino Sans', 'Yu Gothic', 'Meiryo', 'TakaoPGothic', 'Noto Sans CJK JP', 'IPAexGothic'] # IPAexGothicも追加
 except Exception as e: print(f"警告: 日本語フォント設定エラー: {e}")
 
+# --- ★ ポップアップでパラメータ入力を受け取る関数 ★ ---
+def get_parameters_via_popup(defaults):
+    """Tkinterを使用してポップアップウィンドウでfind_peaksパラメータを取得する。"""
+    result = {} # ユーザー入力を格納する辞書
+
+    # --- OKボタンが押されたときの処理 ---
+    def on_ok():
+        nonlocal result # 外側の result 変数を参照
+        try:
+            # Entryウィジェットから文字列を取得
+            h_str = height_entry.get()
+            p_str = prominence_entry.get()
+            d_str = distance_entry.get()
+
+            # --- 入力値の検証とデフォルト値の使用 ---
+            # 空欄ならデフォルト、そうでなければfloatに変換
+            h = float(h_str) if h_str.strip() else defaults.get('height')
+            p = float(p_str) if p_str.strip() else defaults.get('prominence')
+            # Distanceは少し複雑: 空欄ならデフォルト、入力あればint変換
+            d_val = d_str.strip()
+            d = None # distanceはNone許容
+            if d_val: # 何か入力されている場合
+                 d_int = int(float(d_val)) # float経由で整数化
+                 if d_int <= 0: raise ValueError("Distance は1以上の整数である必要があります")
+                 d = d_int
+            elif defaults.get('distance') is not None: # 空欄でデフォルト値がある場合
+                 d = int(defaults.get('distance')) # デフォルト値を整数化
+
+            # 簡単な範囲チェック (負の値でないか)
+            if h is not None and h < 0: raise ValueError("Height は0以上である必要があります")
+            if p is not None and p < 0: raise ValueError("Prominence は0以上である必要があります")
+
+            # 結果を辞書に格納
+            result['height'] = h
+            result['prominence'] = p
+            result['distance'] = d
+            popup.destroy() # ポップアップウィンドウを閉じる
+
+        except ValueError as ve:
+            messagebox.showerror("入力エラー", f"無効な数値が入力されました:\n{ve}", parent=popup) # エラーをポップアップで表示
+        except Exception as ex:
+             messagebox.showerror("エラー", f"予期せぬエラーが発生しました:\n{ex}", parent=popup)
+
+    # --- キャンセルボタンが押されたときの処理 ---
+    def on_cancel():
+         nonlocal result
+         result = None # キャンセルされたことを示すためにNoneを格納
+         popup.destroy()
+
+    # --- ポップアップウィンドウの作成 ---
+    # Toplevelはメインウィンドウ(今回は非表示)の上に表示される
+    popup = Toplevel(root) # 非表示のrootを親とする
+    popup.title("Find Peaks パラメータ入力")
+    popup.geometry("380x200") # ウィンドウサイズ
+
+    # 他のウィンドウ操作を禁止 (モーダル)
+    popup.grab_set()
+    popup.transient(root) # 親ウィンドウ(root)の上に表示
+
+    # --- ウィジェットの配置 ---
+    main_frame = Frame(popup, padx=15, pady=15)
+    main_frame.pack(expand=True, fill=BOTH)
+
+    Label(main_frame, text="グラフを確認し、パラメータを入力してください\n(空欄のままOKでデフォルト値を使用)").grid(row=0, column=0, columnspan=2, pady=(0, 15), sticky=W)
+
+    # Height
+    Label(main_frame, text=f"Height (高さ):").grid(row=1, column=0, sticky=W, padx=5, pady=3)
+    height_entry = Entry(main_frame, width=18)
+    height_entry.grid(row=1, column=1, sticky=W, padx=5, pady=3)
+    height_entry.insert(0, str(defaults.get('height', ''))) # デフォルト値を表示
+
+    # Prominence
+    Label(main_frame, text=f"Prominence (突出度):").grid(row=2, column=0, sticky=W, padx=5, pady=3)
+    prominence_entry = Entry(main_frame, width=18)
+    prominence_entry.grid(row=2, column=1, sticky=W, padx=5, pady=3)
+    prominence_entry.insert(0, str(defaults.get('prominence', '')))
+
+    # Distance
+    Label(main_frame, text=f"Distance (サンプル間隔):").grid(row=3, column=0, sticky=W, padx=5, pady=3)
+    distance_entry = Entry(main_frame, width=18)
+    distance_entry.grid(row=3, column=1, sticky=W, padx=5, pady=3)
+    distance_entry.insert(0, str(defaults.get('distance', '')))
+
+    # --- ボタン ---
+    button_frame = Frame(main_frame)
+    button_frame.grid(row=4, column=0, columnspan=2, pady=(15, 0))
+    ok_button = Button(button_frame, text="OK", width=12, command=on_ok)
+    ok_button.pack(side=LEFT, padx=10)
+    cancel_button = Button(button_frame, text="キャンセル", width=12, command=on_cancel)
+    cancel_button.pack(side=LEFT, padx=10)
+
+    # ウィンドウを中央に表示（おまじない）
+    popup.update_idletasks()
+    x = root.winfo_screenwidth() // 2 - popup.winfo_width() // 2
+    y = root.winfo_screenheight() // 2 - popup.winfo_height() // 2
+    popup.geometry(f"+{x}+{y}")
+
+    # ユーザーの操作を待つ
+    popup.wait_window()
+
+    return result # 結果の辞書 (またはキャンセル時は None) を返す
 
 # --- ユーザーからパラメータ入力を受け取るヘルパー関数 ---
 def get_parameter_input(prompt, default_value):
@@ -97,6 +200,10 @@ def get_expected_column_names(right_prefix, left_prefix, trunk_prefix):
 
 # --- メイン実行ブロック ---
 if __name__ == "__main__":
+    # ★★★ Tkinter を使うためのおまじない (非表示のルートウィンドウ) ★★★
+    root = tk.Tk()
+    root.withdraw()
+    
     print("========================================")
     print("=== 歩行データ解析処理開始 (インタラクティブ) ===")
     print(f"データ検索フォルダ: {DATA_FOLDER.resolve()}")
@@ -152,13 +259,26 @@ if __name__ == "__main__":
         print(f"  [エラー] 初期データのプロット中にエラーが発生しました: {e}")
         exit()
 
-    # === ステップ 0.5: ユーザーからパラメータ入力 ===
-    print(f"\n[ステップ0.5] find_peaks のパラメータを入力してください (信号: {SYNC_SIGNAL_SUFFIX})")
-    user_peak_height = get_parameter_input("  Minimum Peak Height (高さ)", DEFAULT_PEAK_HEIGHT)
-    user_peak_prominence = get_parameter_input("  Minimum Peak Prominence (突出度)", DEFAULT_PEAK_PROMINENCE)
-    user_peak_distance = get_parameter_input("  Minimum Peak Distance (サンプル間隔)", DEFAULT_PEAK_DISTANCE)
-    print(f"  使用するパラメータ: height={user_peak_height}, prominence={user_peak_prominence}, distance={user_peak_distance}")
+    # === ★ ステップ 0.5: ポップアップでパラメータ入力 ★ ===
+    print("\n[ステップ0.5] find_peaks のパラメータをポップアップで入力してください...")
+    # デフォルト値を辞書で準備
+    current_defaults = {
+        'height': DEFAULT_PEAK_HEIGHT,
+        'prominence': DEFAULT_PEAK_PROMINENCE,
+        'distance': DEFAULT_PEAK_DISTANCE
+    }
+    # ポップアップ関数を呼び出し
+    user_params = get_parameters_via_popup(current_defaults)
 
+    # キャンセルされたかチェック
+    if user_params is None:
+        print("\n[情報] パラメータ入力をキャンセルしました。処理を中断します。")
+        exit()
+
+    user_peak_height = user_params.get('height')
+    user_peak_prominence = user_params.get('prominence')
+    user_peak_distance = user_params.get('distance')
+    print(f"  入力されたパラメータ: height={user_peak_height}, prominence={user_peak_prominence}, distance={user_peak_distance}")
 
     # === ステップ 1: 角速度データの前処理 ===
     print("\n[ステップ1] 角速度データの前処理 (入力パラメータ使用) を実行中...")
