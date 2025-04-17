@@ -62,8 +62,8 @@ if __name__ == "__main__":
 
     # === ステップ 1: 角速度データの前処理 ===
     print("\n[ステップ1] 角速度データの前処理を実行中...")
-    # preprocess_angular_velocity を preprocessing から呼び出す
-    sync_gyro_df, lag_samples, sampling_rate = preprocess_angular_velocity(
+    # ★★★ 変更点: 戻り値のアンパックを変更 (7つ受け取る) ★★★
+    result_tuple = preprocess_angular_velocity(
         data_file=input_data_file_path,
         rows_to_skip=ROWS_TO_SKIP,
         sampling_interval_ms=SAMPLING_INTERVAL_MS,
@@ -73,6 +73,14 @@ if __name__ == "__main__":
         sync_col_suffix=SYNC_SIGNAL_SUFFIX,
         align_col_suffix=ALIGN_TARGET_SUFFIX
     )
+
+    # 戻り値の数を確認してアンパック
+    if result_tuple is None or len(result_tuple) != 7:
+         print("\n[エラー] 角速度の前処理に失敗しました (予期せぬ戻り値)。処理を中断します。")
+         exit()
+    # 変数名を変更
+    sync_gyro_df, lag_samples, sampling_rate, peak_idx_l, peak_idx_r, sync_l_short, sync_r_short = result_tuple
+    # ★★★ 変更ここまで ★★★
 
     if sync_gyro_df is None:
         print("\n[エラー] 角速度の前処理に失敗しました。処理を中断します。")
@@ -84,6 +92,38 @@ if __name__ == "__main__":
         print(f"\n[ステップ1.1] 同期済みデータを '{output_sync_file.name}' に保存中...")
         # save_results を file_utils から呼び出す
         save_results(output_sync_file, sync_gyro_df, "同期済み角速度データ")
+
+        # === ★★★ 診断プロット (ピーク検出用) ★★★ ===
+        print("\n[診断] 同期用信号と検出されたピークをプロットします...")
+        try:
+            if sync_l_short is not None and sync_r_short is not None: # データがあるか確認
+                plt.figure(figsize=(14, 7))
+                actual_sync_len = len(sync_l_short) # 実際に使われた長さ
+                time_short = np.arange(actual_sync_len) * (SAMPLING_INTERVAL_MS / 1000.0)
+                plt.plot(time_short, sync_l_short, label=f'同期用 左信号 ({LEFT_PREFIX}{SYNC_SIGNAL_SUFFIX})', alpha=0.8)
+                plt.plot(time_short, sync_r_short, label=f'同期用 右信号 ({RIGHT_PREFIX}{SYNC_SIGNAL_SUFFIX})', linestyle='--', alpha=0.8)
+
+                # 検出されたピーク位置にマーカーをプロット (インデックスが有効範囲内か確認)
+                if 0 <= peak_idx_l < actual_sync_len:
+                     plt.plot(time_short[peak_idx_l], sync_l_short[peak_idx_l], 'ro', markersize=8, label=f'左ピーク (idx={peak_idx_l})')
+                else:
+                     print("  警告: 左ピークインデックスが無効です。")
+                if 0 <= peak_idx_r < actual_sync_len:
+                     plt.plot(time_short[peak_idx_r], sync_r_short[peak_idx_r], 'gx', markersize=10, markeredgewidth=2, label=f'右ピーク (idx={peak_idx_r})')
+                else:
+                     print("  警告: 右ピークインデックスが無効です。")
+
+                plt.title(f'同期に使用した信号区間と検出ピーク ({SYNC_SIGNAL_SUFFIX})')
+                plt.xlabel('時間 (s)')
+                plt.ylabel('信号値 (単位?)') # '加速度'とは限らないので変更
+                plt.legend()
+                plt.grid(True)
+                plt.show()
+            else:
+                print("  情報: プロット用の同期信号データがありません。")
+        except Exception as e:
+            print(f"  エラー: 診断グラフの表示中にエラーが発生しました: {e}")
+        # === 診断プロットここまで ===
 
     # === ステップ 2: 歩行周期の同定 ===
     print("\n[ステップ2] 歩行周期の同定を実行中...")

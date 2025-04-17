@@ -85,13 +85,25 @@ def preprocess_angular_velocity(data_file, rows_to_skip=11, sampling_interval_ms
 
     # --- 信号の抽出と左角速度の符号反転 ---
     try:
-        sync_left = df[f'{left_prefix}{sync_col_suffix}'].fillna(0).values
-        sync_right = df[f'{right_prefix}{sync_col_suffix}'].fillna(0).values
-        align_left_raw = df[f'{left_prefix}{align_col_suffix}'].fillna(
-            0).values
+        sync_left_full = df[f'{left_prefix}{sync_col_suffix}'].fillna(0).values
+        sync_right_full = df[f'{right_prefix}{sync_col_suffix}'].fillna(0).values
+        align_left_raw = df[f'{left_prefix}{align_col_suffix}'].fillna(0).values
         align_right = df[f'{right_prefix}{align_col_suffix}'].fillna(0).values
         align_left = -align_left_raw
         print(f"  情報: 左 {align_col_suffix} の符号を反転しました。")
+        
+                # ★★★ 変更点: 同期計算用に最初の1000サンプルを切り出す ★★★
+        num_samples_for_sync = 1000
+        # データが1000サンプルより短い場合の対応
+        actual_sync_length = min(len(sync_left_full), len(sync_right_full), num_samples_for_sync)
+        if actual_sync_length < num_samples_for_sync:
+            print(f"  警告: 同期用信号の長さが {num_samples_for_sync} サンプル未満です。利用可能な先頭 {actual_sync_length} サンプルで同期します。")
+
+        sync_left_short = sync_left_full[:actual_sync_length]
+        sync_right_short = sync_right_full[:actual_sync_length]
+        print(f"  情報: 同期計算には最初の {actual_sync_length} サンプルを使用します。")
+        # ★★★ 変更ここまで ★★★
+        
     except KeyError as e:
         print(f"エラー: 必要な列名 '{e}' が見つかりません。")
         return None, None, None
@@ -99,36 +111,55 @@ def preprocess_angular_velocity(data_file, rows_to_skip=11, sampling_interval_ms
         print(f"エラー: 信号抽出中にエラーが発生しました: {e}")
         return None, None, None
 
-    # --- 相互相関とラグ計算 ---
+    # --- ★★★ ピーク検出によるラグ計算 ★★★ ---
+    lag_samples = 0
+    peak_index_left = -1
+    peak_index_right = -1
     try:
-        correlation = signal.correlate(sync_right, sync_left, mode='full')
-        lags = signal.correlation_lags(
-            len(sync_right), len(sync_left), mode='full')
-        peak_index = np.argmax(correlation)
-        lag_samples = lags[peak_index]
-    except Exception as e:
-        print(f"エラー: 相互相関の計算中にエラーが発生しました: {e}")
-        return None, None, None
+        if actual_sync_length > 0:
+            print(f"  情報: ピーク検出による同期には最初の {actual_sync_length} サンプルを使用します。")
+            # 絶対値が最大となる点のインデックスを検出
+            peak_index_left = np.argmax(np.abs(sync_left_short))
+            peak_index_right = np.argmax(np.abs(sync_right_short))
 
+            # ラグ計算: lag = left_peak_index - right_peak_index
+            lag_samples = peak_index_left - peak_index_right
+            lag_ms = lag_samples * sampling_interval_ms
+
+            print(f"  同期基準: {sync_col_suffix} (先頭{actual_sync_length}サンプルのピーク検出)")
+            print(f"  左ピーク index: {peak_index_left} (値: {sync_left_short[peak_index_left]:.2f})")
+            print(f"  右ピーク index: {peak_index_right} (値: {sync_right_short[peak_index_right]:.2f})")
+            print(f"  計算されたラグ: {lag_samples} サンプル ({lag_ms:.2f} ms)")
+        else:
+            print("  警告: 同期に使用できるデータがありません。ラグは0とします。")
+
+    except Exception as e:
+        print(f"エラー: ピーク検出またはラグ計算中にエラーが発生しました: {e}")
+        # エラーが起きても、ラグ0で処理を試みるか、エラーを返すか選択できる
+        # ここではエラーを返す
+        return error_return
+    # --- ★★★ ピーク検出 終了 ★★★ ---
     # --- ラグ適用 ---
     try:
+         # ★★★ 注意: ラグ適用は元の長い信号 (align_left, align_right) に対して行う ★★★
         if lag_samples > 0:
             aligned_left_gyro = align_left[lag_samples:]
             aligned_right_gyro = align_right[:len(aligned_left_gyro)]
         elif lag_samples < 0:
             aligned_right_gyro = align_right[abs(lag_samples):]
             aligned_left_gyro = align_left[:len(aligned_right_gyro)]
-        else:
+        else: # lag_samples == 0
             min_len = min(len(align_left), len(align_right))
             aligned_left_gyro = align_left[:min_len]
             aligned_right_gyro = align_right[:min_len]
+
         aligned_length = len(aligned_left_gyro)
-        time_aligned = np.arange(aligned_length) * \
-            (sampling_interval_ms / 1000.0)
+        time_aligned = np.arange(aligned_length) * (sampling_interval_ms / 1000.0)
+        # ★★★ 変更ここまで (ラグ適用ロジック自体に変更はないが、適用するラグ値が変わった) ★★★
+        
     except Exception as e:
         print(f"エラー: ラグの適用中にエラーが発生しました: {e}")
-        return None, None, None
-
+        return error_return
     # --- 同期済みデータをDataFrameにまとめる ---
     try:
         sync_gyro_df = pd.DataFrame({
@@ -141,4 +172,4 @@ def preprocess_angular_velocity(data_file, rows_to_skip=11, sampling_interval_ms
         return None, None, None
 
     print("--- [Function@preprocessing] 1. 角速度データの前処理終了 ---")
-    return sync_gyro_df, lag_samples, sampling_rate_hz
+    return sync_gyro_df, lag_samples, sampling_rate_hz, peak_index_left, peak_index_right, sync_left_short, sync_right_short
