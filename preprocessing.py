@@ -26,10 +26,20 @@ def preprocess_angular_velocity(data_file, rows_to_skip=11, sampling_interval_ms
 
     # --- データの読み込みと列名設定 ---
     try:
-        # data_file が Path オブジェクトの場合も考慮
         data_file_path = Path(data_file) if not isinstance(
             data_file, Path) else data_file
-        df = pd.read_csv(data_file_path, skiprows=rows_to_skip)
+        try:
+            # まず 'cp932' (WindowsのShift_JIS系) を試す
+            df = pd.read_csv(
+                data_file_path, skiprows=rows_to_skip, encoding='cp932')
+            print(f"  ファイル '{data_file_path}' を encoding='cp932' で読み込みました。")
+        except UnicodeDecodeError:
+            print(f"  encoding='cp932' で失敗。encoding='shift_jis' を試します...")
+            # 'cp932' がダメなら 'shift_jis' を試す
+            df = pd.read_csv(
+                data_file_path, skiprows=rows_to_skip, encoding='shift_jis')
+            print(
+                f"  ファイル '{data_file_path}' を encoding='shift_jis' で読み込みました。")
 
         new_column_names = [
             'Time',
@@ -44,7 +54,9 @@ def preprocess_angular_velocity(data_file, rows_to_skip=11, sampling_interval_ms
             f'{trunk_prefix}_Acc_X', f'{trunk_prefix}_Acc_Y', f'{trunk_prefix}_Acc_Z',
             'Blank_3',
             f'{trunk_prefix}_Gyro_X', f'{trunk_prefix}_Gyro_Y', f'{trunk_prefix}_Gyro_Z',
-            'Blank_4'
+            'Blank_4',
+            'Blank_5', 'Blank_6', 'Blank_7', 'Blank_8',
+            'Blank_9', 'Blank_10', 'Blank_11', 'Blank_12'
         ]
 
         if len(df.columns) == len(new_column_names):
@@ -59,6 +71,14 @@ def preprocess_angular_velocity(data_file, rows_to_skip=11, sampling_interval_ms
     except FileNotFoundError:
         print(f"エラー: データファイルが見つかりません: {data_file_path}")
         return None, None, None
+    except UnicodeDecodeError as e:
+        # 上記の try/except でも読み込めなかった場合の最終的なエラー表示
+        print(
+            f"[エラー@preprocessing] ファイル '{data_file_path}' の読み込み中にエンコーディングエラーが発生しました。")
+        print(f"  試したエンコーディング: 'cp932', 'shift_jis'")
+        print(f"  エラー詳細: {e}")
+        print(f"  ファイルのエンコーディングが上記以外（例: 'euc_jp'）であるか、ファイルが破損している可能性があります。")
+        return None, None, None
     except Exception as e:
         print(f"エラー: データ読み込み・列名設定中にエラーが発生しました: {e}")
         return None, None, None
@@ -67,7 +87,8 @@ def preprocess_angular_velocity(data_file, rows_to_skip=11, sampling_interval_ms
     try:
         sync_left = df[f'{left_prefix}{sync_col_suffix}'].fillna(0).values
         sync_right = df[f'{right_prefix}{sync_col_suffix}'].fillna(0).values
-        align_left_raw = df[f'{left_prefix}{align_col_suffix}'].fillna(0).values
+        align_left_raw = df[f'{left_prefix}{align_col_suffix}'].fillna(
+            0).values
         align_right = df[f'{right_prefix}{align_col_suffix}'].fillna(0).values
         align_left = -align_left_raw
         print(f"  情報: 左 {align_col_suffix} の符号を反転しました。")
