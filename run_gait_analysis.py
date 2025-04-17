@@ -1,4 +1,5 @@
 # run_gait_analysis.py
+
 # --- 各機能ファイルをインポート ---
 from preprocessing import preprocess_angular_velocity
 from gait_cycles import identify_gait_cycles # Placeholder
@@ -13,63 +14,74 @@ import matplotlib.font_manager as fm
 from pathlib import Path
 
 # --- 解析実行のための設定 ---
-DATA_FOLDER = Path("./")
-OUTPUT_SUFFIX_SYNC = '_synchronized_gyro_z.csv'
-OUTPUT_SUFFIX_GAIT = '_gait_events.csv'
-OUTPUT_SUFFIX_PCI = '_pci_results.csv'
-ROWS_TO_SKIP = 11
-SAMPLING_INTERVAL_MS = 5
-SYNC_SIGNAL_SUFFIX = '_Acc_Y' # 同期に使う信号
-ALIGN_TARGET_SUFFIX = '_Gyro_Z'
-RIGHT_PREFIX = 'R'
-LEFT_PREFIX = 'L'
-TRUNK_PREFIX = 'T'
-# ★ デフォルトの find_peaks パラメータ ★
-DEFAULT_PEAK_HEIGHT = 0.5
-DEFAULT_PEAK_PROMINENCE = 0.3
-DEFAULT_PEAK_DISTANCE = 50
-NUM_SAMPLES_TO_PLOT = 1000 # 初期プロットのサンプル数
+# ★★★ これらの設定値は必要に応じて変更してください ★★★
+DATA_FOLDER = Path("./") # データ検索フォルダ (デフォルト: スクリプトと同じ場所)
+OUTPUT_SUFFIX_SYNC = '_synchronized_gyro_z.csv' # 同期済み角速度データの接尾辞
+OUTPUT_SUFFIX_GAIT = '_gait_events.csv'     # (将来用) 歩行周期データの接尾辞
+OUTPUT_SUFFIX_PCI = '_pci_results.csv'   # (将来用) PCI結果の接尾辞
+
+# 前処理パラメータ
+ROWS_TO_SKIP = 11                 # スキップするヘッダー前の行数
+SAMPLING_INTERVAL_MS = 5          # サンプリング周期 (ms)
+SYNC_SIGNAL_SUFFIX = '_Acc_Y'     # ★同期に使う信号の軸 (例: _Acc_X, _Acc_Z も試す)
+ALIGN_TARGET_SUFFIX = '_Gyro_Z'   # 同期を適用する信号
+RIGHT_PREFIX = 'R'                # 右センサーのプレフィックス
+LEFT_PREFIX = 'L'                 # 左センサーのプレフィックス
+TRUNK_PREFIX = 'T'                # 体幹センサーのプレフィックス (列名設定用)
+
+# find_peaks のデフォルトパラメータ (ユーザー入力用)
+DEFAULT_PEAK_HEIGHT = 0.5         # ★グラフを見て調整★
+DEFAULT_PEAK_PROMINENCE = 0.3     # ★グラフを見て調整★
+DEFAULT_PEAK_DISTANCE = 50        # ★グラフを見て調整★
+NUM_SAMPLES_TO_PLOT = 1000        # 初期プロットで表示するサンプル数
+# ★★★ ここまで設定値 ★★★
+
 
 # --- 日本語フォント設定 ---
 try:
     plt.rcParams['font.family'] = 'sans-serif'
-    plt.rcParams['font.sans-serif'] = ['Hiragino Sans', 'Yu Gothic', 'Meiryo', 'TakaoPGothic', 'Noto Sans CJK JP']
+    plt.rcParams['font.sans-serif'] = ['Hiragino Sans', 'Yu Gothic', 'Meiryo', 'TakaoPGothic', 'Noto Sans CJK JP', 'IPAexGothic'] # IPAexGothicも追加
 except Exception as e: print(f"警告: 日本語フォント設定エラー: {e}")
 
 
-# --- ★ ユーザーからパラメータ入力を受け取るヘルパー関数 ★ ---
+# --- ユーザーからパラメータ入力を受け取るヘルパー関数 ---
 def get_parameter_input(prompt, default_value):
     """指定されたプロンプトでユーザー入力を求め、数値に変換して返す。Enterのみならデフォルト値。"""
     while True:
         try:
             # input() は文字列を返す
-            user_input_str = input(f"  {prompt} (デフォルト: {default_value}): ")
+            default_display = f"(デフォルト: {default_value})" if default_value is not None else "(デフォルト: なし)"
+            user_input_str = input(f"  {prompt} {default_display}: ")
+
             if not user_input_str.strip(): # 空文字かチェック (Enterのみ)
                 print(f"    -> デフォルト値 {default_value} を使用します。")
-                # デフォルト値が None でないか、または float/int に変換可能か確認
-                if default_value is None:
-                    return None
-                # distance は整数にする
-                if "distance" in prompt.lower():
-                    return int(default_value)
-                else:
-                    return float(default_value)
+                # distance のデフォルトが int でない可能性を考慮
+                if default_value is not None and "distance" in prompt.lower():
+                    try:
+                        return int(default_value)
+                    except (ValueError, TypeError):
+                         print(f"  警告: distance のデフォルト値 ({default_value}) を整数に変換できません。None を使用します。")
+                         return None # または 1 などの安全な値
+                return default_value # float or None
 
-            value = float(user_input_str) # まずfloatに変換試行
-            if value < 0:
+            value_f = float(user_input_str) # まずfloatに変換試行
+            if value_f < 0:
                  print("  エラー: 値は0以上である必要があります。")
                  continue
+
             # distance の場合は整数にする
             if "distance" in prompt.lower():
-                if value != int(value) or value <= 0: # 整数でない、または0以下
+                value_i = int(value_f)
+                if value_f != value_i or value_i <= 0: # 整数でない、または0以下
                     print("  エラー: distance は1以上の整数である必要があります。")
                     continue
-                return int(value)
-            return value # height, prominence は float でOK
+                return value_i
+            return value_f # height, prominence は float でOK
         except ValueError:
             print("  エラー: 有効な数値を入力してください。")
         except Exception as e:
             print(f"  予期せぬ入力エラー: {e}")
+
 
 # --- 列名定義 (preprocessing.py と共通化が必要だが、ここではコピー) ---
 # 本来は別ファイルか設定で共通化すべき
@@ -99,13 +111,12 @@ if __name__ == "__main__":
     output_gait_file = DATA_FOLDER / (base_filename + OUTPUT_SUFFIX_GAIT)
     output_pci_file = DATA_FOLDER / (base_filename + OUTPUT_SUFFIX_PCI)
 
-    # === ★ ステップ 0: 初期データの表示 ★ ===
+    # === ステップ 0: 初期データの表示 ===
     print(f"\n[ステップ0] 同期用信号 ({SYNC_SIGNAL_SUFFIX}) の先頭 {NUM_SAMPLES_TO_PLOT} サンプルをプロットします...")
     sync_l_short_plot, sync_r_short_plot = None, None
     plot_len = 0
     try:
-        # --- 初期プロット用にデータを一時読み込み ---
-        # (preprocessing.py と同じ読み込み・列名設定ロジックが必要)
+        # --- 初期プロット用にデータを一時読み込み & 列名設定 ---
         temp_df = None
         try: temp_df = pd.read_csv(input_data_file_path, skiprows=ROWS_TO_SKIP, encoding='cp932')
         except UnicodeDecodeError: temp_df = pd.read_csv(input_data_file_path, skiprows=ROWS_TO_SKIP, encoding='shift_jis')
@@ -140,10 +151,8 @@ if __name__ == "__main__":
         print(f"  [エラー] 初期データのプロット中にエラーが発生しました: {e}")
         exit()
 
-    # === ★ ステップ 0.5: ユーザーからパラメータ入力 ★ ===
+    # === ステップ 0.5: ユーザーからパラメータ入力 ===
     print(f"\n[ステップ0.5] find_peaks のパラメータを入力してください (信号: {SYNC_SIGNAL_SUFFIX})")
-    # None をデフォルト値として渡すことも可能 (find_peaks は None を無視する)
-    # user_peak_height = get_parameter_input("  Minimum Peak Height (高さ)", None)
     user_peak_height = get_parameter_input("  Minimum Peak Height (高さ)", DEFAULT_PEAK_HEIGHT)
     user_peak_prominence = get_parameter_input("  Minimum Peak Prominence (突出度)", DEFAULT_PEAK_PROMINENCE)
     user_peak_distance = get_parameter_input("  Minimum Peak Distance (サンプル間隔)", DEFAULT_PEAK_DISTANCE)
@@ -171,7 +180,7 @@ if __name__ == "__main__":
     if result_tuple is None or len(result_tuple) != 7:
          print("\n[エラー] 角速度の前処理に失敗しました (予期せぬ戻り値)。処理を中断します。")
          exit()
-    # 診断プロット用の sync_short は不要なので捨てる
+    # 診断プロット用の sync_short は不要なので捨てる意味で _ を使う
     sync_gyro_df, lag_samples, sampling_rate, peak_idx_l, peak_idx_r, _, _ = result_tuple
 
     if sync_gyro_df is None:
@@ -179,25 +188,39 @@ if __name__ == "__main__":
          exit()
     else:
          print(f"\n[成功] 前処理完了。")
-         print(f"  左ピーク index: {peak_idx_l}, 右ピーク index: {peak_idx_r}")
-         print(f"  同期ラグ: {lag_samples} サンプル")
+         # 検出されたピークインデックスとラグを表示
+         if peak_idx_l != -1 and peak_idx_r != -1:
+            print(f"  採用された 左ピーク index: {peak_idx_l}, 右ピーク index: {peak_idx_r}")
+            print(f"  同期ラグ: {lag_samples} サンプル")
+         else:
+            print(f"  警告: ピークが検出されなかったため、ラグは {lag_samples} となっています。")
          print(f"  サンプリング周波数: {sampling_rate:.2f} Hz")
          print(f"\n[ステップ1.1] 同期済みデータを '{output_sync_file.name}' に保存中...")
          save_results(output_sync_file, sync_gyro_df, "同期済み角速度データ")
 
     # === ステップ 2, 3 (Gait Cycles, PCI - Placeholders) ===
-    # (変更なし)
     print("\n[ステップ2] 歩行周期の同定を実行中...")
     gait_events_df = identify_gait_cycles(sync_gyro_df, sampling_rate)
     if gait_events_df is None:
         print("  (歩行周期の同定は未実装か、データがありませんでした)")
         print("\n[ステップ3] PCI計算はスキップされます (歩行周期データなし)")
     else:
-        # ... (将来の処理) ...
-        pass
+        # (将来の処理)
+        print(f"\n[ステップ2.1] 歩行周期データを '{output_gait_file.name}' に保存中...")
+        save_results(output_gait_file, gait_events_df, "歩行周期データ")
+        print("\n[ステップ3] PCI計算を実行中...")
+        pci_results = calculate_pci(gait_events_df)
+        if pci_results is None:
+             print("  (PCI計算は未実装か、データがありませんでした)")
+        else:
+             print(f"\n[ステップ3.1] PCI計算結果を '{output_pci_file.name}' に保存中...")
+             try:
+                 pci_df = pd.DataFrame([pci_results])
+                 save_results(output_pci_file, pci_df, "PCI計算結果")
+                 print("\n  PCI 計算結果 (コンソール表示):", pci_results)
+             except Exception as e: print(f"  エラー: PCI結果のDataFrame変換/保存中にエラー: {e}")
 
     # === ステップ 4: 最終結果プロット (同期済み角速度) ===
-    # ★★★ 診断プロットは削除 (ステップ0で表示済み) ★★★
     if sync_gyro_df is not None:
          print("\n[ステップ4] 同期済みZ軸角速度のグラフを表示します...")
          try:
@@ -209,13 +232,14 @@ if __name__ == "__main__":
                 plt.plot(sync_gyro_df['time_aligned_sec'], sync_gyro_df[right_col_name], label=f'同期後 右 {ALIGN_TARGET_SUFFIX}', linestyle='--', alpha=0.8)
                 plt.title(f'同期済み角速度 ({ALIGN_TARGET_SUFFIX}) - {input_data_file_path.name}')
                 plt.xlabel('同期後の時間 (秒)')
-                plt.ylabel('角速度 (単位?)')
+                plt.ylabel('角速度 (単位?)') # 単位が分かれば追記 (例: deg/s)
                 plt.legend()
                 plt.grid(True)
                 plt.show() # 最後のグラフを表示
-             else: print(f"  警告: プロットに必要な列が見つかりません。")
-         except Exception as e: print(f"  エラー: グラフの表示中にエラー: {e}")
+             else: print(f"  警告: プロットに必要な列が見つかりません ({left_col_name} or {right_col_name})。")
+         except Exception as e: print(f"  エラー: 最終グラフの表示中にエラー: {e}")
 
     print("\n========================================")
-    print(f"=== 解析処理終了 ({input_data_file_path.name}) ===")
+    print(f"=== 解析処理終了 ({input_data_file_path.name if input_data_file_path else 'エラー発生'}) ===")
     print("========================================")
+    # input("エンターキーを押して終了します...") # 必要ならコメント解除
