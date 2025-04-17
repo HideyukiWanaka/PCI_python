@@ -1,4 +1,4 @@
-# preprocessing.py
+￥# preprocessing.py
 import pandas as pd
 import numpy as np
 from scipy import signal
@@ -67,8 +67,7 @@ def preprocess_angular_velocity(data_file, rows_to_skip=11, sampling_interval_ms
     try:
         sync_left = df[f'{left_prefix}{sync_col_suffix}'].fillna(0).values
         sync_right = df[f'{right_prefix}{sync_col_suffix}'].fillna(0).values
-        align_left_raw = df[f'{left_prefix}{align_col_suffix}'].fillna(
-            0).values
+        align_left_raw = df[f'{left_prefix}{align_col_suffix}'].fillna(0).values
         align_right = df[f'{right_prefix}{align_col_suffix}'].fillna(0).values
         align_left = -align_left_raw
         print(f"  情報: 左 {align_col_suffix} の符号を反転しました。")
