@@ -23,7 +23,7 @@ def identify_gait_cycles(sync_gyro_df, sampling_rate_hz,
                          swing_peak_prominence=50, # Swingの正ピークの最小突出度
                          # --- 待機時間関連 ---
                          # fo_wait_time_ms=150 # 固定待機時間は使わない
-                         min_fo_wait_time_ms=50 # 動的計算結果が短すぎる場合の最小待機時間
+                         min_fo_wait_time_ms=50, start_time_sec=None, end_time_sec=None # 動的計算結果が短すぎる場合の最小待機時間
                          ):
     """
     同期済みの角速度データから歩行周期イベント（IC, FO）を同定する。
