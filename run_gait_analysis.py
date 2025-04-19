@@ -36,22 +36,19 @@ except ImportError:
 
 # --- 解析実行のための設定 ---
 DATA_FOLDER = Path("./")
-OUTPUT_SUFFIX_SYNC = '_synchronized_gyro_z.csv'
-OUTPUT_SUFFIX_GAIT = '_gait_events_segmented.csv'
+# ★ 出力ファイル名変更 ★
+OUTPUT_SUFFIX_SYNC = '_synchronized_gyro_z.csv' # 同期済み角速度データの接尾辞
+OUTPUT_SUFFIX_GAIT_TRIMMED = '_gait_events_steady.csv'   # 前後除外後の定常部分
 OUTPUT_SUFFIX_PCI = '_pci_results.csv'
-ROWS_TO_SKIP = 11
-SAMPLING_INTERVAL_MS = 5
-SYNC_SIGNAL_SUFFIX = '_Acc_Y'
-ALIGN_TARGET_SUFFIX = '_Gyro_Z'
-RIGHT_PREFIX = 'R'
-LEFT_PREFIX = 'L'
-TRUNK_PREFIX = 'T'
-DEFAULT_PEAK_HEIGHT = 10.0
-DEFAULT_PEAK_PROMINENCE = 0.3
-DEFAULT_PEAK_DISTANCE = 50
+# ... (ROWS_TO_SKIPなど - 変更なし) ...
+ROWS_TO_SKIP = 11; SAMPLING_INTERVAL_MS = 5; SYNC_SIGNAL_SUFFIX = '_Acc_Y'; ALIGN_TARGET_SUFFIX = '_Gyro_Z'
+RIGHT_PREFIX = 'R'; LEFT_PREFIX = 'L'; TRUNK_PREFIX = 'T'
+DEFAULT_PEAK_HEIGHT = 10.0; DEFAULT_PEAK_PROMINENCE = 0.3; DEFAULT_PEAK_DISTANCE = 50
 NUM_SAMPLES_TO_PLOT = 1000
-MAX_IC_INTERVAL_SEC = 2.0 # IC間の最大許容時間（トライアル分割用）
-MIN_ICS_PER_TRIAL = 11    # トライアルとみなす最小IC数
+MAX_IC_INTERVAL_SEC = 2.0; MIN_ICS_PER_TRIAL = 11
+# ★★★ 前後除外する歩数を追加 ★★★
+NUM_ICS_REMOVE_START = 3
+NUM_ICS_REMOVE_END = 5
 
 # --- 列名定義関数 ---
 def get_expected_column_names(right_prefix, left_prefix, trunk_prefix):
@@ -79,6 +76,47 @@ def segment_walking_trials(events_df, max_interval_sec, min_ics_per_trial):
     valid_trials = df_segmented['Trial_ID'].unique()
     print(f"  -> {len(valid_trials)} 個の有効な歩行トライアル (ID: {valid_trials.tolist()}) を検出")
     return df_segmented.drop(columns=['Time_Diff', 'Trial_ID_Raw', 'Trial_IC_Count'])
+
+# --- ★★★ トライアルの最初と最後を除外する関数 ★★★ ---
+def trim_trial_ends(df_segmented, n_start=3, n_end=5):
+    """
+    Trial_ID と Leg でグループ化し、各グループの先頭n_start個と末尾n_end個のICを除外する。
+    """
+    print(f"--- トライアルの前後除外開始 (先頭: {n_start}歩, 末尾: {n_end}歩) ---")
+    if df_segmented is None or df_segmented.empty:
+        print("  入力データがないため、処理をスキップします。")
+        return pd.DataFrame()
+
+    min_required_ics = n_start + n_end + 1 # 除外後に最低1歩残るための最小歩数
+
+    # 各グループに対して処理を適用し、結果を結合する
+    trimmed_groups = []
+    # Trial_ID と Leg でグループ化し、IC_Indexでソートしておく
+    grouped = df_segmented.sort_values(by='IC_Index').groupby(['Trial_ID', 'Leg'], sort=False)
+
+    total_removed_count = 0
+    original_count = len(df_segmented)
+
+    for name, group in grouped:
+        if len(group) >= min_required_ics:
+            # iloc を使って先頭 n_start 個と末尾 n_end 個を除外
+            trimmed_group = group.iloc[n_start:-n_end]
+            trimmed_groups.append(trimmed_group)
+            total_removed_count += len(group) - len(trimmed_group)
+        else:
+            # 条件を満たさないグループは完全に除外
+            # print(f"  情報: Trial {name[0]}, Leg {name[1]} はIC数が足りないため除外 ({len(group)} < {min_required_ics})")
+            total_removed_count += len(group)
+
+    if not trimmed_groups:
+        print("  警告: 前後除外の結果、有効な歩行周期が残りませんでした。")
+        return pd.DataFrame()
+
+    # 有効なグループを結合
+    df_trimmed = pd.concat(trimmed_groups).reset_index(drop=True)
+    print(f"  前後除外処理完了。 {original_count} -> {len(df_trimmed)} イベント ({total_removed_count} イベント除外)")
+
+    return df_trimmed
 
 
 # --- Tkinter GUI アプリケーションクラス ---
@@ -200,22 +238,36 @@ class GaitAnalysisApp:
 
 
             # === ステップ 2: 歩行周期同定 (全体データに対して) ===
+                        # === ステップ 2: 歩行周期同定 (全体データに対して) ===
             gait_events_df_all = None; filtered_signals = {}; time_vector = None
             if sync_gyro_df is not None:
                 print("\n[ステップ2] 歩行周期の同定 (全体) を実行中...")
-                # スイング閾値などをここで指定可能にする（あるいは設定値を使う）
                 current_swing_threshold = 100 # ★必要なら調整★
-                gait_events_result = identify_gait_cycles(
-                    sync_gyro_df=sync_gyro_df,
-                    sampling_rate_hz=self.sampling_rate,
-                    swing_threshold=current_swing_threshold
-                    # 他のパラメータ(ic_prominence等)も必要ならGUIから取得orここで指定
-                )
-
+                gait_events_result = identify_gait_cycles(sync_gyro_df=sync_gyro_df, sampling_rate_hz=self.sampling_rate, swing_threshold=current_swing_threshold)
                 if gait_events_result is not None and isinstance(gait_events_result, dict):
-                     gait_events_df_all = gait_events_result.get("events_df")
-                     filtered_signals = gait_events_result.get("filtered_signals", {})
-                     time_vector = gait_events_result.get("time_vector")
+                     gait_events_df_all = gait_events_result.get("events_df"); filtered_signals = gait_events_result.get("filtered_signals", {}); time_vector = gait_events_result.get("time_vector")
+
+                if gait_events_df_all is None or gait_events_df_all.empty:
+                     print("  歩行周期を同定できませんでした。"); messagebox.showwarning("歩行周期同定", "歩行周期同定失敗", parent=self.master)
+                     print("\n[ステップ3] PCI計算スキップ")
+                else:
+                     print(f"  {len(gait_events_df_all)} 個の歩行周期候補を全体から検出。")
+                     # === ★ ステップ 2.1: 歩行トライアル分割 ★ ===
+                     print("\n[ステップ2.1] 歩行トライアルの自動分割を実行中...")
+                     gait_events_df_segmented = segment_walking_trials( # 分割後のDFを受け取る
+                         events_df=gait_events_df_all, max_interval_sec=MAX_IC_INTERVAL_SEC, min_ics_per_trial=MIN_ICS_PER_TRIAL )
+
+                     if gait_events_df_segmented.empty:
+                          print("  有効な歩行トライアルが見つかりませんでした。"); messagebox.showwarning("トライアル分割", "有効歩行トライアル検出不可", parent=self.master)
+                          print("\n[ステップ3] PCI計算スキップ")
+                     else:
+                          # === ★ ステップ 2.2: トライアルの前後除外 ★ ===
+                          print("\n[ステップ2.2] 定常歩行部分の抽出（前後除外）を実行中...")
+                          gait_events_df_steady = trim_trial_ends( # ★新しい関数を呼び出し★
+                              df_segmented=gait_events_df_segmented,
+                              n_start=NUM_ICS_REMOVE_START,
+                              n_end=NUM_ICS_REMOVE_END
+                          )
 
                 if gait_events_df_all is None or gait_events_df_all.empty:
                      print("  歩行周期を同定できませんでした。"); messagebox.showwarning("歩行周期同定", "歩行周期同定失敗", parent=self.master)
@@ -236,15 +288,43 @@ class GaitAnalysisApp:
                           print("\n[ステップ3] PCI計算スキップ")
                      else:
                           # --- ステップ 2.2: 歩行周期データ(分割後)の保存 ---
-                          output_gait_file = DATA_FOLDER / (base_filename + OUTPUT_SUFFIX_GAIT)
+                          output_gait_file = DATA_FOLDER / (base_filename + OUTPUT_SUFFIX_GAIT_TRIMMED)
                           print(f"\n[ステップ2.2] 有効な歩行周期データを保存中..."); save_results(output_gait_file, gait_events_df_segmented, "歩行周期データ(分割後)")
                           print("\n--- 同定された有効歩行周期 (最初の5件) ---"); print(gait_events_df_segmented[['Leg', 'Trial_ID', 'Cycle', 'IC_Time', 'FO_Time']].head().to_string()); print("---")
                           # --- ステップ 2.3: IC/FOイベントのプロット ---
                           self.plot_gait_events(gait_events_df_segmented, filtered_signals, time_vector) # 分割後データでプロット
-                          # --- ステップ 3: PCI計算 (Placeholder) ---
-                          print("\n[ステップ3] PCI計算を実行中..."); pci_results = calculate_pci(gait_events_df_segmented) # 分割後データで計算
-                          if pci_results is None: print("  (PCI計算 未実装/失敗)")
-                          else: print(f"\n  PCI 結果:", pci_results)
+                          # === ステップ 3: PCI計算 ===
+                          print("\n[ステップ3] PCI計算を実行中...")
+                          pci_results = calculate_pci(gait_events_df_steady)
+
+                          if pci_results is None:
+                                print("  PCI計算に失敗しました。")
+                                messagebox.showwarning("PCI計算", "PCI計算失敗", parent=self.master)
+                          else:
+                                print(f"\n  PCI 計算結果:")
+                                # ★★★ 表示項目を追加 ★★★
+                                for key, value in pci_results.items():
+                                     # 値が float なら小数点以下2桁で表示 (それ以外はそのまま)
+                                     if isinstance(value, (float, np.floating)):
+                                         print(f"    {key}: {value:.2f}")
+                                     else:
+                                          print(f"    {key}: {value}")
+                                # ★★★ 表示ここまで ★★★
+
+                                # 結果の保存
+                                try:
+                                    pci_df = pd.DataFrame([pci_results])
+                                    output_pci_file = DATA_FOLDER / (base_filename + OUTPUT_SUFFIX_PCI)
+                                    print(f"\n[ステップ3.1] PCI計算結果を '{output_pci_file.name}' に保存中...")
+                                    save_results(output_pci_file, pci_df, "PCI計算結果")
+                                    # ポップアップ表示も少し詳細に
+                                    pci_val_str = f"{pci_results.get('PCI', 'N/A'):.2f}" if not pd.isna(pci_results.get('PCI')) else 'N/A'
+                                    cv_l_str = f"{pci_results.get('StrideTime_CV_L_percent', 'N/A'):.2f}" if not pd.isna(pci_results.get('StrideTime_CV_L_percent')) else 'N/A'
+                                    cv_r_str = f"{pci_results.get('StrideTime_CV_R_percent', 'N/A'):.2f}" if not pd.isna(pci_results.get('StrideTime_CV_R_percent')) else 'N/A'
+                                    messagebox.showinfo("PCI計算完了", f"PCI計算完了。\nPCI: {pci_val_str}\nStride CV L: {cv_l_str}%\nStride CV R: {cv_r_str}%", parent=self.master)
+                                except Exception as e_pci_save:
+                                     print(f"  エラー: PCI結果の保存中にエラー: {e_pci_save}")
+                                     messagebox.showerror("ファイル保存エラー", f"PCI結果の保存エラー:\n{e_pci_save}", parent=self.master)
 
             # === ステップ 4: 同期済み角速度の最終プロット ===
             self.plot_final_synchronized_data(sync_gyro_df)
