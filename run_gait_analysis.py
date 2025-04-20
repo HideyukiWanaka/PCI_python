@@ -3,8 +3,12 @@
 # --- 各機能ファイルをインポート ---
 from preprocessing import preprocess_angular_velocity
 from gait_cycles import identify_gait_cycles
-from pci import calculate_pci             # Placeholder
+from pci import calculate_pci
 from file_utils import find_latest_csv_file, save_results
+from temporal_parameters import calculate_temporal_params
+from kinematic_parameters import calculate_kinematic_params
+from symmetry_indices import calculate_symmetry_index
+# smoothness_metrics は import しない
 
 # --- 必要な標準ライブラリ・外部ライブラリをインポート ---
 import pandas as pd
@@ -36,17 +40,23 @@ except ImportError:
 
 # --- 解析実行のための設定 ---
 DATA_FOLDER = Path("./")
-# ★ 出力ファイル名変更 ★
-OUTPUT_SUFFIX_SYNC = '_synchronized_gyro_z.csv' # 同期済み角速度データの接尾辞
-OUTPUT_SUFFIX_GAIT_TRIMMED = '_gait_events_steady.csv'   # 前後除外後の定常部分
-OUTPUT_SUFFIX_PCI = '_pci_results.csv'
-# ... (ROWS_TO_SKIPなど - 変更なし) ...
-ROWS_TO_SKIP = 11; SAMPLING_INTERVAL_MS = 5; SYNC_SIGNAL_SUFFIX = '_Acc_Y'; ALIGN_TARGET_SUFFIX = '_Gyro_Z'
-RIGHT_PREFIX = 'R'; LEFT_PREFIX = 'L'; TRUNK_PREFIX = 'T'
-DEFAULT_PEAK_HEIGHT = 10.0; DEFAULT_PEAK_PROMINENCE = 0.3; DEFAULT_PEAK_DISTANCE = 50
+OUTPUT_FOLDER = Path("./analysis_results")
+OUTPUT_SUFFIX_SYNC = '_synchronized_gyro_z.csv'
+OUTPUT_SUFFIX_GAIT_TRIMMED = '_gait_events_steady.csv'
+OUTPUT_ALL_PARAMS_FILE = '_all_gait_parameters.csv' # PCIファイルではなく全パラメータ用
+ROWS_TO_SKIP = 11
+SAMPLING_INTERVAL_MS = 5
+SYNC_SIGNAL_SUFFIX = '_Acc_Y'
+ALIGN_TARGET_SUFFIX = '_Gyro_Z'
+RIGHT_PREFIX = 'R'
+LEFT_PREFIX = 'L'
+TRUNK_PREFIX = 'T'
+DEFAULT_PEAK_HEIGHT = 10.0
+DEFAULT_PEAK_PROMINENCE = 0.3
+DEFAULT_PEAK_DISTANCE = 50
 NUM_SAMPLES_TO_PLOT = 1000
-MAX_IC_INTERVAL_SEC = 2.0; MIN_ICS_PER_TRIAL = 11
-# ★★★ 前後除外する歩数を追加 ★★★
+MAX_IC_INTERVAL_SEC = 2.0
+MIN_ICS_PER_TRIAL = 11
 NUM_ICS_REMOVE_START = 3
 NUM_ICS_REMOVE_END = 5
 
@@ -77,53 +87,30 @@ def segment_walking_trials(events_df, max_interval_sec, min_ics_per_trial):
     print(f"  -> {len(valid_trials)} 個の有効な歩行トライアル (ID: {valid_trials.tolist()}) を検出")
     return df_segmented.drop(columns=['Time_Diff', 'Trial_ID_Raw', 'Trial_IC_Count'])
 
-# --- ★★★ トライアルの最初と最後を除外する関数 ★★★ ---
+# --- トライアルの最初と最後を除外する関数 ---
 def trim_trial_ends(df_segmented, n_start=3, n_end=5):
-    """
-    Trial_ID と Leg でグループ化し、各グループの先頭n_start個と末尾n_end個のICを除外する。
-    """
+    """Trial_ID と Leg でグループ化し、各グループの先頭n_start個と末尾n_end個のICを除外"""
     print(f"--- トライアルの前後除外開始 (先頭: {n_start}歩, 末尾: {n_end}歩) ---")
-    if df_segmented is None or df_segmented.empty:
-        print("  入力データがないため、処理をスキップします。")
-        return pd.DataFrame()
-
-    min_required_ics = n_start + n_end + 1 # 除外後に最低1歩残るための最小歩数
-
-    # 各グループに対して処理を適用し、結果を結合する
+    if df_segmented is None or df_segmented.empty: return pd.DataFrame()
+    min_required_ics = n_start + n_end + 1
     trimmed_groups = []
-    # Trial_ID と Leg でグループ化し、IC_Indexでソートしておく
     grouped = df_segmented.sort_values(by='IC_Index').groupby(['Trial_ID', 'Leg'], sort=False)
-
-    total_removed_count = 0
-    original_count = len(df_segmented)
-
+    total_removed_count = 0; original_count = len(df_segmented)
     for name, group in grouped:
         if len(group) >= min_required_ics:
-            # iloc を使って先頭 n_start 個と末尾 n_end 個を除外
-            trimmed_group = group.iloc[n_start:-n_end]
-            trimmed_groups.append(trimmed_group)
+            trimmed_group = group.iloc[n_start:-n_end]; trimmed_groups.append(trimmed_group)
             total_removed_count += len(group) - len(trimmed_group)
-        else:
-            # 条件を満たさないグループは完全に除外
-            # print(f"  情報: Trial {name[0]}, Leg {name[1]} はIC数が足りないため除外 ({len(group)} < {min_required_ics})")
-            total_removed_count += len(group)
-
-    if not trimmed_groups:
-        print("  警告: 前後除外の結果、有効な歩行周期が残りませんでした。")
-        return pd.DataFrame()
-
-    # 有効なグループを結合
+        else: total_removed_count += len(group)
+    if not trimmed_groups: print("警告: 前後除外の結果、有効歩行周期なし"); return pd.DataFrame()
     df_trimmed = pd.concat(trimmed_groups).reset_index(drop=True)
     print(f"  前後除外処理完了。 {original_count} -> {len(df_trimmed)} イベント ({total_removed_count} イベント除外)")
-
     return df_trimmed
-
 
 # --- Tkinter GUI アプリケーションクラス ---
 class GaitAnalysisApp:
     def __init__(self, master):
         self.master = master
-        master.title("歩行データ同期・周期同定ツール")
+        master.title("歩行データ同期・周期同定・パラメータ算出ツール") # タイトル更新
         master.geometry("900x700")
         self.input_file_path = None
         self.sampling_rate = 1000.0 / SAMPLING_INTERVAL_MS
@@ -135,86 +122,50 @@ class GaitAnalysisApp:
         self.fig = Figure(figsize=(8, 4), dpi=100); self.ax = self.fig.add_subplot(111)
         self.canvas = FigureCanvasTkAgg(self.fig, master=master); self.canvas_widget = self.canvas.get_tk_widget()
         self.canvas_widget.pack(side=tk.TOP, fill=BOTH, expand=True)
-        toolbar_frame = Frame(master); toolbar_frame.pack(side=tk.TOP, fill=tk.X)
-        self.toolbar = NavigationToolbar2Tk(self.canvas, toolbar_frame); self.toolbar.update()
+        toolbar_frame = Frame(master); toolbar_frame.pack(side=tk.TOP, fill=tk.X); self.toolbar = NavigationToolbar2Tk(self.canvas, toolbar_frame); self.toolbar.update()
 
         param_frame = Frame(master, pady=10); param_frame.pack(side=tk.TOP, fill=tk.X)
-        self.height_var = tk.DoubleVar(value=DEFAULT_PEAK_HEIGHT)
-        self.prominence_var = tk.DoubleVar(value=DEFAULT_PEAK_PROMINENCE)
-        self.distance_var = tk.IntVar(value=DEFAULT_PEAK_DISTANCE)
+        self.height_var = tk.DoubleVar(value=DEFAULT_PEAK_HEIGHT); self.prominence_var = tk.DoubleVar(value=DEFAULT_PEAK_PROMINENCE); self.distance_var = tk.IntVar(value=DEFAULT_PEAK_DISTANCE)
 
-        # スライダーと値表示ラベル
         row_idx = 0
-        Label(param_frame, text="Height:").grid(row=row_idx, column=0, padx=5, pady=2, sticky=W)
-        self.height_scale = Scale(param_frame, from_=0, to=50, resolution=0.1, orient=HORIZONTAL, variable=self.height_var, length=150); self.height_scale.grid(row=row_idx, column=1, padx=5, pady=2)
-        self.height_label_val = Label(param_frame, text=f"{self.height_var.get():.1f}", width=5); self.height_label_val.grid(row=row_idx, column=2, padx=5, pady=2)
-        self.height_scale.config(command=lambda v: self.height_label_val.config(text=f"{float(v):.1f}"))
-        Label(param_frame, text="Prominence:").grid(row=row_idx, column=3, padx=5, pady=2, sticky=W)
-        self.prominence_scale = Scale(param_frame, from_=0, to=10, resolution=0.1, orient=HORIZONTAL, variable=self.prominence_var, length=150); self.prominence_scale.grid(row=row_idx, column=4, padx=5, pady=2)
-        self.prominence_label_val = Label(param_frame, text=f"{self.prominence_var.get():.1f}", width=5); self.prominence_label_val.grid(row=row_idx, column=5, padx=5, pady=2)
-        self.prominence_scale.config(command=lambda v: self.prominence_label_val.config(text=f"{float(v):.1f}"))
+        Label(param_frame, text="Height:").grid(row=row_idx, column=0, padx=5, pady=2, sticky=W); self.height_scale = Scale(param_frame, from_=0, to=50, resolution=0.1, orient=HORIZONTAL, variable=self.height_var, length=150); self.height_scale.grid(row=row_idx, column=1, padx=5, pady=2); self.height_label_val = Label(param_frame, text=f"{self.height_var.get():.1f}", width=5); self.height_label_val.grid(row=row_idx, column=2, padx=5, pady=2); self.height_scale.config(command=lambda v: self.height_label_val.config(text=f"{float(v):.1f}"))
+        Label(param_frame, text="Prominence:").grid(row=row_idx, column=3, padx=5, pady=2, sticky=W); self.prominence_scale = Scale(param_frame, from_=0, to=10, resolution=0.1, orient=HORIZONTAL, variable=self.prominence_var, length=150); self.prominence_scale.grid(row=row_idx, column=4, padx=5, pady=2); self.prominence_label_val = Label(param_frame, text=f"{self.prominence_var.get():.1f}", width=5); self.prominence_label_val.grid(row=row_idx, column=5, padx=5, pady=2); self.prominence_scale.config(command=lambda v: self.prominence_label_val.config(text=f"{float(v):.1f}"))
         row_idx += 1
-        Label(param_frame, text="Distance:").grid(row=row_idx, column=0, padx=5, pady=2, sticky=W)
-        self.distance_scale = Scale(param_frame, from_=1, to=200, resolution=1, orient=HORIZONTAL, variable=self.distance_var, length=150); self.distance_scale.grid(row=row_idx, column=1, padx=5, pady=2)
-        self.distance_label_val = Label(param_frame, text=f"{self.distance_var.get():d}", width=5); self.distance_label_val.grid(row=row_idx, column=2, padx=5, pady=2)
-        self.distance_scale.config(command=lambda v: self.distance_label_val.config(text=f"{int(float(v)):d}"))
+        Label(param_frame, text="Distance:").grid(row=row_idx, column=0, padx=5, pady=2, sticky=W); self.distance_scale = Scale(param_frame, from_=1, to=200, resolution=1, orient=HORIZONTAL, variable=self.distance_var, length=150); self.distance_scale.grid(row=row_idx, column=1, padx=5, pady=2); self.distance_label_val = Label(param_frame, text=f"{self.distance_var.get():d}", width=5); self.distance_label_val.grid(row=row_idx, column=2, padx=5, pady=2); self.distance_scale.config(command=lambda v: self.distance_label_val.config(text=f"{int(float(v)):d}"))
 
-        # 実行ボタン (最初は無効)
-        self.run_button = Button(param_frame, text="同期実行 ＆ 歩行周期同定", command=self.run_analysis_pipeline, width=25, state=DISABLED)
-        self.run_button.grid(row=row_idx-1, column=6, rowspan=2, padx=20, pady=5, sticky=tk.W + tk.E + tk.S) # 配置微調整
+        self.run_button = Button(param_frame, text="同期実行 ＆ 歩行周期同定・パラメータ算出", command=self.run_analysis_pipeline, width=30, state=DISABLED) # ボタン名変更
+        self.run_button.grid(row=row_idx-1, column=6, rowspan=2, padx=20, pady=5, sticky=tk.W + tk.E + tk.S)
 
-        # 初期データロード（GUI準備後に実行）
-        self.status_label.config(text="最新ファイル検索中...")
-        self.master.update_idletasks()
-        self.master.after(100, self.load_and_plot_initial_data)
+        self.status_label.config(text="最新ファイル検索中..."); self.master.update_idletasks(); self.master.after(100, self.load_and_plot_initial_data)
 
-    # --- 初期データのロードとプロット ---
     def load_and_plot_initial_data(self):
         print("\n[準備] 最新のCSVデータを検索中...")
         self.input_file_path = find_latest_csv_file(DATA_FOLDER)
         if self.input_file_path is None: messagebox.showerror("エラー", f"CSVファイル未検出 ({DATA_FOLDER.resolve()})"); self.master.quit(); return
         self.file_label.config(text=f"処理対象: {self.input_file_path.name}")
-
-        self.status_label.config(text="データ読込・プロット中...")
-        self.master.update_idletasks()
-
+        self.status_label.config(text="データ読込・プロット中..."); self.master.update_idletasks()
         try:
             temp_df = None
             try: temp_df = pd.read_csv(self.input_file_path, skiprows=ROWS_TO_SKIP, encoding='cp932')
             except UnicodeDecodeError: temp_df = pd.read_csv(self.input_file_path, skiprows=ROWS_TO_SKIP, encoding='shift_jis')
             expected_cols = get_expected_column_names(RIGHT_PREFIX, LEFT_PREFIX, TRUNK_PREFIX)
-            if len(temp_df.columns) == len(expected_cols):
-                temp_df.columns = expected_cols
-                blank_cols = [col for col in temp_df.columns if 'Blank_' in col]; temp_df = temp_df.drop(columns=blank_cols)
+            if len(temp_df.columns) == len(expected_cols): temp_df.columns = expected_cols; blank_cols = [col for col in temp_df.columns if 'Blank_' in col]; temp_df = temp_df.drop(columns=blank_cols)
             else: raise ValueError(f"初期読み込みで列数が不一致 ({len(temp_df.columns)} vs {len(expected_cols)})")
-
-            sync_l_full = temp_df[f'{LEFT_PREFIX}{SYNC_SIGNAL_SUFFIX}'].fillna(0).values
-            sync_r_full = temp_df[f'{RIGHT_PREFIX}{SYNC_SIGNAL_SUFFIX}'].fillna(0).values
-            plot_len = min(len(sync_l_full), len(sync_r_full), NUM_SAMPLES_TO_PLOT)
+            sync_l_full = temp_df[f'{LEFT_PREFIX}{SYNC_SIGNAL_SUFFIX}'].fillna(0).values; sync_r_full = temp_df[f'{RIGHT_PREFIX}{SYNC_SIGNAL_SUFFIX}'].fillna(0).values
+            plot_len = min(len(sync_l_full), len(sync_r_full), NUM_SAMPLES_TO_PLOT);
             if plot_len <= 0: raise ValueError("プロットデータなし")
-            sync_l_short_plot = sync_l_full[:plot_len]; sync_r_short_plot = sync_r_full[:plot_len]
-            time_plot = np.arange(plot_len) * (SAMPLING_INTERVAL_MS / 1000.0)
-
-            self.ax.clear()
-            self.ax.plot(time_plot, sync_l_short_plot, label=f'左 ({LEFT_PREFIX}{SYNC_SIGNAL_SUFFIX})', alpha=0.8)
-            self.ax.plot(time_plot, sync_r_short_plot, label=f'右 ({RIGHT_PREFIX}{SYNC_SIGNAL_SUFFIX})', linestyle='--', alpha=0.8)
-            self.ax.set_title(f'同期用信号 先頭 {plot_len} サンプル (パラメータ調整用)')
-            self.ax.set_xlabel('時間 (s)'); self.ax.set_ylabel('信号値 (単位?)'); self.ax.legend(); self.ax.grid(True); self.canvas.draw()
-
-            self.run_button.config(state=NORMAL)
-            self.status_label.config(text="準備完了. パラメータ調整後、ボタン実行.")
+            sync_l_short_plot = sync_l_full[:plot_len]; sync_r_short_plot = sync_r_full[:plot_len]; time_plot = np.arange(plot_len) * (SAMPLING_INTERVAL_MS / 1000.0)
+            self.ax.clear(); self.ax.plot(time_plot, sync_l_short_plot, label=f'左 ({LEFT_PREFIX}{SYNC_SIGNAL_SUFFIX})', alpha=0.8); self.ax.plot(time_plot, sync_r_short_plot, label=f'右 ({RIGHT_PREFIX}{SYNC_SIGNAL_SUFFIX})', linestyle='--', alpha=0.8)
+            self.ax.set_title(f'同期用信号 先頭 {plot_len} サンプル (パラメータ調整用)'); self.ax.set_xlabel('時間 (s)'); self.ax.set_ylabel('信号値 (単位?)'); self.ax.legend(); self.ax.grid(True); self.canvas.draw()
+            self.run_button.config(state=NORMAL); self.status_label.config(text="準備完了. パラメータ調整後、ボタン実行.")
             print(f"  プロット完了。パラメータを調整してボタンを押してください。")
+        except Exception as e: self.status_label.config(text="エラー発生！"); messagebox.showerror("エラー", f"初期データのプロット中にエラー:\n{e}", parent=self.master); self.run_button.config(state=DISABLED)
 
-        except Exception as e:
-            self.status_label.config(text="エラー発生！")
-            messagebox.showerror("エラー", f"初期データのプロット中にエラー:\n{e}", parent=self.master)
-            self.run_button.config(state=DISABLED)
-
-    # --- 「同期実行 ＆ 歩行周期同定」ボタンの処理 ---
     def run_analysis_pipeline(self):
         self.run_button.config(state=DISABLED); self.status_label.config(text="解析処理実行中..."); self.master.update_idletasks()
-        sync_gyro_df = None # スコープのために初期化
-        gait_events_df_segmented = pd.DataFrame() # 初期化
+        # 変数初期化
+        sync_gyro_df, gait_events_df_segmented, gait_events_df_steady = None, pd.DataFrame(), pd.DataFrame()
+        filtered_signals = {}; time_vector = None
         try:
             print("\n========================================"); print("=== 解析パイプライン実行 ===")
             user_peak_height = self.height_var.get(); user_peak_prominence = self.prominence_var.get(); user_peak_distance = self.distance_var.get()
@@ -222,188 +173,139 @@ class GaitAnalysisApp:
 
             # === ステップ 1: 前処理 ===
             print("\n[ステップ1] 角速度データの前処理...")
+            # preprocess_angular_velocity は sync_gyro_df(Time,L/R GyroZ), lag, fs, peakL, peakR, syncL_short, syncR_short を返す
             result_tuple = preprocess_angular_velocity(
                  data_file=self.input_file_path, rows_to_skip=ROWS_TO_SKIP, sampling_interval_ms=SAMPLING_INTERVAL_MS,
                  right_prefix=RIGHT_PREFIX, left_prefix=LEFT_PREFIX, trunk_prefix=TRUNK_PREFIX,
                  sync_col_suffix=SYNC_SIGNAL_SUFFIX, align_col_suffix=ALIGN_TARGET_SUFFIX,
                  peak_height=user_peak_height, peak_prominence=user_peak_prominence, peak_distance=user_peak_distance)
+
             if result_tuple is None or len(result_tuple) != 7: messagebox.showerror("エラー", "前処理失敗(戻り値不正)"); return
+            # ★ アンパックを元に戻す ★
             sync_gyro_df, lag_samples, self.sampling_rate, peak_idx_l, peak_idx_r, _, _ = result_tuple
-            if sync_gyro_df is None: messagebox.showerror("エラー", "前処理失敗"); return
+            if sync_gyro_df is None or sync_gyro_df.empty: messagebox.showerror("エラー", "前処理失敗(データ空)"); return
 
-            result_message = f"前処理完了。\n左ピーク idx: {peak_idx_l}, 右ピーク idx: {peak_idx_r}\n同期ラグ: {lag_samples} サンプル"
-            print(f"\n[成功] {result_message}"); messagebox.showinfo("前処理完了", result_message, parent=self.master)
-            base_filename = self.input_file_path.stem; output_sync_file = DATA_FOLDER / (base_filename + OUTPUT_SUFFIX_SYNC)
-            print(f"\n[ステップ1.1] 同期済みデータを保存中..."); save_results(output_sync_file, sync_gyro_df, "同期済みデータ")
+            result_message = f"前処理完了。\nLag: {lag_samples} samples"; print(f"\n[成功] {result_message}")
+            base_filename = self.input_file_path.stem; output_sync_file = OUTPUT_FOLDER / (base_filename + OUTPUT_SUFFIX_SYNC)
+            print(f"\n[ステップ1.1] 同期済みGyro Zデータ保存中..."); save_results(output_sync_file, sync_gyro_df, "同期済みGyro Zデータ")
 
 
-            # === ステップ 2: 歩行周期同定 (全体データに対して) ===
-                        # === ステップ 2: 歩行周期同定 (全体データに対して) ===
-            gait_events_df_all = None; filtered_signals = {}; time_vector = None
-            if sync_gyro_df is not None:
+            # === ステップ 2: 歩行周期同定 ===
+            gait_events_df_all = None
+            if sync_gyro_df is not None: # sync_gyro_df (Time, L/R GyroZ) を渡す
                 print("\n[ステップ2] 歩行周期の同定 (全体) を実行中...")
-                current_swing_threshold = 100 # ★必要なら調整★
+                current_swing_threshold = 100
                 gait_events_result = identify_gait_cycles(sync_gyro_df=sync_gyro_df, sampling_rate_hz=self.sampling_rate, swing_threshold=current_swing_threshold)
                 if gait_events_result is not None and isinstance(gait_events_result, dict):
-                     gait_events_df_all = gait_events_result.get("events_df"); filtered_signals = gait_events_result.get("filtered_signals", {}); time_vector = gait_events_result.get("time_vector")
+                     gait_events_df_all = gait_events_result.get("events_df")
+                     filtered_signals = gait_events_result.get("filtered_signals", {})
+                     time_vector = gait_events_result.get("time_vector")
+                if gait_events_df_all is None or gait_events_df_all.empty: print("  歩行周期候補を検出できませんでした。")
+                else: print(f"  {len(gait_events_df_all)} 個の歩行周期候補を検出。")
 
-                if gait_events_df_all is None or gait_events_df_all.empty:
-                     print("  歩行周期を同定できませんでした。"); messagebox.showwarning("歩行周期同定", "歩行周期同定失敗", parent=self.master)
-                     print("\n[ステップ3] PCI計算スキップ")
-                else:
-                     print(f"  {len(gait_events_df_all)} 個の歩行周期候補を全体から検出。")
-                     # === ★ ステップ 2.1: 歩行トライアル分割 ★ ===
-                     print("\n[ステップ2.1] 歩行トライアルの自動分割を実行中...")
-                     gait_events_df_segmented = segment_walking_trials( # 分割後のDFを受け取る
-                         events_df=gait_events_df_all, max_interval_sec=MAX_IC_INTERVAL_SEC, min_ics_per_trial=MIN_ICS_PER_TRIAL )
+            # === ステップ 2.1: 歩行トライアル分割 ===
+            if gait_events_df_all is not None and not gait_events_df_all.empty:
+                print("\n[ステップ2.1] 歩行トライアルの自動分割を実行中...")
+                gait_events_df_segmented = segment_walking_trials(events_df=gait_events_df_all, max_interval_sec=MAX_IC_INTERVAL_SEC, min_ics_per_trial=MIN_ICS_PER_TRIAL)
+            else: gait_events_df_segmented = pd.DataFrame()
 
-                     if gait_events_df_segmented.empty:
-                          print("  有効な歩行トライアルが見つかりませんでした。"); messagebox.showwarning("トライアル分割", "有効歩行トライアル検出不可", parent=self.master)
-                          print("\n[ステップ3] PCI計算スキップ")
-                     else:
-                          # === ★ ステップ 2.2: トライアルの前後除外 ★ ===
-                          print("\n[ステップ2.2] 定常歩行部分の抽出（前後除外）を実行中...")
-                          gait_events_df_steady = trim_trial_ends( # ★新しい関数を呼び出し★
-                              df_segmented=gait_events_df_segmented,
-                              n_start=NUM_ICS_REMOVE_START,
-                              n_end=NUM_ICS_REMOVE_END
-                          )
+            # === ステップ 2.2: トライアルの前後除外 ===
+            if not gait_events_df_segmented.empty:
+                print("\n[ステップ2.2] 定常歩行部分の抽出（前後除外）を実行中...")
+                gait_events_df_steady = trim_trial_ends(df_segmented=gait_events_df_segmented, n_start=NUM_ICS_REMOVE_START, n_end=NUM_ICS_REMOVE_END)
+            else: gait_events_df_steady = pd.DataFrame()
 
-                if gait_events_df_all is None or gait_events_df_all.empty:
-                     print("  歩行周期を同定できませんでした。"); messagebox.showwarning("歩行周期同定", "歩行周期同定失敗", parent=self.master)
-                     print("\n[ステップ3] PCI計算スキップ")
-                     # gait_events_df_segmented は空のまま
-                else:
-                     print(f"  {len(gait_events_df_all)} 個の歩行周期候補を全体から検出。")
-                     # === ステップ 2.1: 歩行トライアル分割 ===
-                     print("\n[ステップ2.1] 歩行トライアルの自動分割を実行中...")
-                     gait_events_df_segmented = segment_walking_trials(
-                         events_df=gait_events_df_all,
-                         max_interval_sec=MAX_IC_INTERVAL_SEC,
-                         min_ics_per_trial=MIN_ICS_PER_TRIAL
-                     )
+            # === ステップ 3 & 4: パラメータ計算 & 保存/表示 ===
+            if not gait_events_df_steady.empty:
+                output_gait_file = OUTPUT_FOLDER / (base_filename + OUTPUT_SUFFIX_GAIT_TRIMMED)
+                print(f"\n[ステップ2.3] 定常歩行周期データを保存中..."); save_results(output_gait_file, gait_events_df_steady, "定常歩行周期データ")
+                print("\n--- 抽出された定常歩行周期 (最初の5件) ---"); print(gait_events_df_steady[['Leg', 'Trial_ID', 'Cycle', 'IC_Time', 'FO_Time']].head().to_string()); print("---")
+                self.plot_gait_events(gait_events_df_steady, filtered_signals, time_vector) # IC/FOプロット
 
-                     if gait_events_df_segmented.empty:
-                          print("  有効な歩行トライアルが見つかりませんでした。"); messagebox.showwarning("トライアル分割", "有効歩行トライアル検出不可", parent=self.master)
-                          print("\n[ステップ3] PCI計算スキップ")
-                     else:
-                          # --- ステップ 2.2: 歩行周期データ(分割後)の保存 ---
-                          output_gait_file = DATA_FOLDER / (base_filename + OUTPUT_SUFFIX_GAIT_TRIMMED)
-                          print(f"\n[ステップ2.2] 有効な歩行周期データを保存中..."); save_results(output_gait_file, gait_events_df_segmented, "歩行周期データ(分割後)")
-                          print("\n--- 同定された有効歩行周期 (最初の5件) ---"); print(gait_events_df_segmented[['Leg', 'Trial_ID', 'Cycle', 'IC_Time', 'FO_Time']].head().to_string()); print("---")
-                          # --- ステップ 2.3: IC/FOイベントのプロット ---
-                          self.plot_gait_events(gait_events_df_segmented, filtered_signals, time_vector) # 分割後データでプロット
-                          # === ステップ 3: PCI計算 ===
-                          print("\n[ステップ3] PCI計算を実行中...")
-                          pci_results = calculate_pci(gait_events_df_steady)
+                print("\n[ステップ3] 各種歩行パラメータを計算中...")
+                results_all = {}
+                temporal_params = calculate_temporal_params(gait_events_df_steady); results_all.update(temporal_params or {})
+                if filtered_signals and time_vector is not None: # Kinematic は filtered_signals が必要
+                    kinematic_params = calculate_kinematic_params(gait_events_df_steady, filtered_signals, time_vector, self.sampling_rate); results_all.update(kinematic_params or {})
+                else: print("警告: Kinematic params計算に必要な信号なし")
+                pci_params = calculate_pci(gait_events_df_steady); results_all.update(pci_params or {})
+                print("  対称性指数 (Symmetry Index) を計算中...")
+                symmetry_results = {}; param_pairs = { 'Stride_Time_%': ('Mean_Stride_Time_L_s', 'Mean_Stride_Time_R_s'), 'Swing_Time_%': ('Mean_Swing_Time_L_s', 'Mean_Swing_Time_R_s'), 'Stance_Time_%': ('Mean_Stance_Time_L_s', 'Mean_Stance_Time_R_s'), 'Max_Swing_Vel_%': ('Mean_Max_Swing_Vel_L', 'Mean_Max_Swing_Vel_R'), 'Peak_Stance_Vel_%': ('Mean_Peak_Stance_Vel_L', 'Mean_Peak_Stance_Vel_R') }
+                for si_name, (key_L, key_R) in param_pairs.items():
+                    val_L, val_R = results_all.get(key_L), results_all.get(key_R)
+                    symmetry_results[f'SI_{si_name}'] = calculate_symmetry_index(val_L, val_R) if pd.notna(val_L) and pd.notna(val_R) else np.nan
+                results_all.update(symmetry_results); print("  対称性指数 計算完了。")
 
-                          if pci_results is None:
-                                print("  PCI計算に失敗しました。")
-                                messagebox.showwarning("PCI計算", "PCI計算失敗", parent=self.master)
-                          else:
-                                print(f"\n  PCI 計算結果:")
-                                # ★★★ 表示項目を追加 ★★★
-                                for key, value in pci_results.items():
-                                     # 値が float なら小数点以下2桁で表示 (それ以外はそのまま)
-                                     if isinstance(value, (float, np.floating)):
-                                         print(f"    {key}: {value:.2f}")
-                                     else:
-                                          print(f"    {key}: {value}")
-                                # ★★★ 表示ここまで ★★★
-
-                                # 結果の保存
-                                try:
-                                    pci_df = pd.DataFrame([pci_results])
-                                    output_pci_file = DATA_FOLDER / (base_filename + OUTPUT_SUFFIX_PCI)
-                                    print(f"\n[ステップ3.1] PCI計算結果を '{output_pci_file.name}' に保存中...")
-                                    save_results(output_pci_file, pci_df, "PCI計算結果")
-                                    # ポップアップ表示も少し詳細に
-                                    pci_val_str = f"{pci_results.get('PCI', 'N/A'):.2f}" if not pd.isna(pci_results.get('PCI')) else 'N/A'
-                                    cv_l_str = f"{pci_results.get('StrideTime_CV_L_percent', 'N/A'):.2f}" if not pd.isna(pci_results.get('StrideTime_CV_L_percent')) else 'N/A'
-                                    cv_r_str = f"{pci_results.get('StrideTime_CV_R_percent', 'N/A'):.2f}" if not pd.isna(pci_results.get('StrideTime_CV_R_percent')) else 'N/A'
-                                    messagebox.showinfo("PCI計算完了", f"PCI計算完了。\nPCI: {pci_val_str}\nStride CV L: {cv_l_str}%\nStride CV R: {cv_r_str}%", parent=self.master)
-                                except Exception as e_pci_save:
-                                     print(f"  エラー: PCI結果の保存中にエラー: {e_pci_save}")
-                                     messagebox.showerror("ファイル保存エラー", f"PCI結果の保存エラー:\n{e_pci_save}", parent=self.master)
+                print(f"\n--- 全計算結果 ---");
+                if results_all:
+                    for key, value in sorted(results_all.items()):
+                         if isinstance(value, (float, np.floating)): print(f"  {key}: {value:.3f}")
+                         else: print(f"  {key}: {value}")
+                    print("--------------------"); output_all_params_file = OUTPUT_FOLDER / (base_filename + OUTPUT_ALL_PARAMS_FILE)
+                    print(f"\n[ステップ3.1] 全パラメータを保存中..."); save_results(output_all_params_file, pd.DataFrame([results_all]), "全歩行パラメータ")
+                    pci_val=results_all.get('PCI'); pci_str=f"{pci_val:.2f}" if pd.notna(pci_val) else 'N/A'; cad_val=results_all.get('Cadence_steps_per_min'); cad_str=f"{cad_val:.1f}" if pd.notna(cad_val) else 'N/A'; si_stride=results_all.get('SI_Stride_Time_%'); si_str=f"{si_stride:.1f}" if pd.notna(si_stride) else 'N/A'
+                    messagebox.showinfo("パラメータ計算完了", f"計算完了。\nPCI: {pci_str}, Cadence: {cad_str}\nStride SI: {si_str}%", parent=self.master)
+                else: print("  警告: 計算パラメータなし。")
+            else: print("\n[情報] 有効な定常歩行周期データがないため、パラメータ計算スキップ。")
 
             # === ステップ 4: 同期済み角速度の最終プロット ===
+            # ★★★ sync_gyro_df を渡す必要あり ★★★
             self.plot_final_synchronized_data(sync_gyro_df)
 
-            print("\n--- 解析パイプライン 完了 ---")
-            self.status_label.config(text="解析完了")
-
-        except Exception as e:
-             print(f"\n[エラー] 解析パイプライン実行中にエラー: {e}"); messagebox.showerror("実行時エラー", f"解析中にエラー:\n{e}", parent=self.master)
-             self.status_label.config(text="エラー発生")
-        finally:
-             self.run_button.config(state=NORMAL); self.master.update_idletasks()
-
+            print("\n--- 解析パイプライン 完了 ---"); self.status_label.config(text="解析完了")
+        except Exception as e: print(f"\n[エラー] 解析パイプライン実行中にエラー: {e}"); messagebox.showerror("実行時エラー", f"解析中にエラー:\n{e}", parent=self.master); self.status_label.config(text="エラー発生")
+        finally: self.run_button.config(state=NORMAL); self.master.update_idletasks()
 
     # --- IC/FO イベントプロット用メソッド ---
     def plot_gait_events(self, gait_events_df, filtered_signals, time_vector):
-        print("\n[ステップ2.3] IC/FO イベント (自動分割後) をグラフにプロットします...")
+        print("\n[ステップ2.4] IC/FO イベント (定常歩行区間) をグラフにプロットします...")
         if gait_events_df is None or gait_events_df.empty: print("プロットするイベントデータなし"); return
         try:
-            fig_events, axes = plt.subplots(2, 1, figsize=(14, 8), sharex=True)
-            fig_events.suptitle(f'検出された歩行イベント (自動分割後) - {self.input_file_path.name}')
-            plot_successful = False
+            fig_events, axes = plt.subplots(2, 1, figsize=(14, 8), sharex=True); fig_events.suptitle(f'検出された歩行イベント (定常区間) - {self.input_file_path.name}'); plot_successful = False
             if time_vector is None or len(time_vector) == 0:
                  sig_len = len(filtered_signals.get('L', []));
                  if sig_len == 0: sig_len = len(filtered_signals.get('R',[]))
                  if sig_len > 0 : time_vector = np.arange(sig_len) * (1.0/self.sampling_rate)
                  else: raise ValueError("プロット用時間ベクトル不明")
-
             for i, leg in enumerate(['L', 'R']):
                 ax = axes[i]; filt_signal = filtered_signals.get(leg)
-                if filt_signal is None or len(filt_signal) != len(time_vector):
-                     print(f"警告: {leg}脚 プロットデータ不整合"); ax.set_title(f'{leg} 脚 - データ不整合'); continue
-
-                ax.plot(time_vector, filt_signal, label=f'{leg} Gyro Z (Filtered)', alpha=0.7)
-                leg_events = gait_events_df[gait_events_df['Leg'] == leg]
+                if filt_signal is None or len(filt_signal) != len(time_vector): print(f"警告: {leg}脚 プロットデータ不整合"); ax.set_title(f'{leg} 脚 - データ不整合'); continue
+                ax.plot(time_vector, filt_signal, label=f'{leg} Gyro Z (Filtered)', alpha=0.7); leg_events = gait_events_df[gait_events_df['Leg'] == leg]
                 ic_times = leg_events['IC_Time'].dropna().values; fo_times = leg_events['FO_Time'].dropna().values
-                # 時間に対応するインデックスを見つける
                 ic_indices_plot = np.searchsorted(time_vector, ic_times, side='left'); fo_indices_plot = np.searchsorted(time_vector, fo_times, side='left')
                 ic_indices_plot = ic_indices_plot[ic_indices_plot < len(time_vector)]; fo_indices_plot = fo_indices_plot[fo_indices_plot < len(time_vector)]
-
-                if len(ic_indices_plot) > 0: ax.plot(time_vector[ic_indices_plot], filt_signal[ic_indices_plot], 'ro', markersize=6, label='IC (踵接地)', linestyle='None')
-                if len(fo_indices_plot) > 0: ax.plot(time_vector[fo_indices_plot], filt_signal[fo_indices_plot], 'gx', markersize=8, markeredgewidth=2, label='FO (爪先離地)', linestyle='None')
+                valid_ic_indices = ic_indices_plot[ic_indices_plot < len(filt_signal)]; valid_fo_indices = fo_indices_plot[fo_indices_plot < len(filt_signal)]
+                if len(valid_ic_indices) > 0: ax.plot(time_vector[valid_ic_indices], filt_signal[valid_ic_indices], 'ro', markersize=6, label='IC (踵接地)', linestyle='None')
+                if len(valid_fo_indices) > 0: ax.plot(time_vector[valid_fo_indices], filt_signal[valid_fo_indices], 'gx', markersize=8, markeredgewidth=2, label='FO (爪先離地)', linestyle='None')
                 ax.set_title(f'{leg} 脚'); ax.set_ylabel('角速度 (単位?)'); ax.legend(loc='upper right'); ax.grid(True); plot_successful = True
-
-            if plot_successful:
-                 axes[1].set_xlabel('時間 (s)'); plt.tight_layout(rect=[0, 0.03, 1, 0.96]); plt.show(block=False)
+            if plot_successful: axes[1].set_xlabel('時間 (s)'); plt.tight_layout(rect=[0, 0.03, 1, 0.96]); plt.show(block=False)
             else: plt.close(fig_events); print("イベントグラフプロット不可")
         except Exception as e: print(f"  エラー: IC/FOプロットエラー: {e}")
 
     # --- 同期済み角速度の最終プロット用メソッド ---
-    def plot_final_synchronized_data(self, sync_gyro_df):
+    def plot_final_synchronized_data(self, sync_gyro_df): # ★引数名を sync_gyro_df に戻す★
          if sync_gyro_df is not None:
              print(f"\n[ステップ4] 同期済み{ALIGN_TARGET_SUFFIX}のグラフ (先頭部分) を表示します...")
              try:
                  if not sync_gyro_df.empty:
-                      num_samples_final_plot = 1000; sync_gyro_df_short = sync_gyro_df.head(num_samples_final_plot); actual_plot_len = len(sync_gyro_df_short)
+                      num_samples_final_plot = 1000
+                      sync_df_short = sync_gyro_df.head(num_samples_final_plot) # ★入力DFを使用★
+                      actual_plot_len = len(sync_df_short)
                       plt.figure(figsize=(12, 6))
-                      left_col_name = f'L{ALIGN_TARGET_SUFFIX}_aligned'; right_col_name = f'R{ALIGN_TARGET_SUFFIX}_aligned'
-                      if left_col_name in sync_gyro_df_short.columns and right_col_name in sync_gyro_df_short.columns:
-                         plt.plot(sync_gyro_df_short['time_aligned_sec'], sync_gyro_df_short[left_col_name], label=f'同期後 左 {ALIGN_TARGET_SUFFIX}'); plt.plot(sync_gyro_df_short['time_aligned_sec'], sync_gyro_df_short[right_col_name], label=f'同期後 右 {ALIGN_TARGET_SUFFIX}', linestyle='--', alpha=0.8)
+                      left_col_name = f'L{ALIGN_TARGET_SUFFIX}_aligned'; right_col_name = f'R{ALIGN_TARGET_SUFFIX}_aligned'; time_col_name = 'time_aligned_sec'
+                      if left_col_name in sync_df_short.columns and right_col_name in sync_df_short.columns and time_col_name in sync_df_short.columns:
+                         plt.plot(sync_df_short[time_col_name], sync_df_short[left_col_name], label=f'同期後 左 {ALIGN_TARGET_SUFFIX}'); plt.plot(sync_df_short[time_col_name], sync_df_short[right_col_name], label=f'同期後 右 {ALIGN_TARGET_SUFFIX}', linestyle='--', alpha=0.8)
                          plt.title(f'同期済み角速度 - 先頭 {actual_plot_len} サンプル ({self.input_file_path.name})'); plt.xlabel('時間 (s)'); plt.ylabel('角速度 (単位?)'); plt.legend(); plt.grid(True)
                          plt.show(block=False)
-                      else: print(f"  警告: プロット列なし")
+                      else: print(f"  警告: 最終プロット列なし")
                  else: print("  警告: 同期済みデータ空")
              except Exception as e: print(f"  エラー: 最終グラフ表示エラー: {e}")
 
-
 # --- メイン実行ブロック ---
 if __name__ == "__main__":
-    root = tk.Tk()
-    root.withdraw()
-    app_window = Toplevel(root)
-    app = GaitAnalysisApp(app_window)
+    root = tk.Tk(); root.withdraw()
+    app_window = Toplevel(root); app = GaitAnalysisApp(app_window)
     app_window.protocol("WM_DELETE_WINDOW", root.destroy)
-    try:
-        root.mainloop()
-    except KeyboardInterrupt:
-        print("\nCtrl+C により中断されました。")
-    finally:
-         print("\n========================================")
-         print("=== アプリケーション終了 ===")
-         print("========================================")
+    try: root.mainloop()
+    except KeyboardInterrupt: print("\nCtrl+C により中断")
+    finally: print("\n=== アプリケーション終了 ===")
