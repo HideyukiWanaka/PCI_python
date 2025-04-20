@@ -1,0 +1,22 @@
+#!/bin/zsh
+
+# この Automator アプリケーション (.app) が保存されているフォルダを取得
+# この .app ファイルは Python スクリプトと同じフォルダに置くことを想定
+SCRIPT_DIR=$(dirname "$0")
+cd "$SCRIPT_DIR"
+
+# --- ★★★ ご自身の Miniforge Python へのフルパスを確認・修正 ★★★ ---
+# 以前のエラーログから判断すると、おそらくこれで合っていますが、念のため確認してください。
+PYTHON_EXEC="/Users/wanakahideyuki/miniforge3/bin/python"
+# --- パス確認ここまで ---
+
+SCRIPT_NAME="run_gait_analysis.py"
+
+# ターミナルを起動し、スクリプトを実行する AppleScript コマンド (osascript経由)
+# 1. スクリプトのあるディレクトリに移動 (cd)
+# 2. 指定したPythonでスクリプトを実行
+# 3. 終了後にメッセージを表示し、Enterキーが押されるまでウィンドウを閉じるのを待つ (read)
+osascript -e "tell application \"Terminal\" to do script \"cd '$SCRIPT_DIR' && '$PYTHON_EXEC' '$SCRIPT_NAME'; echo \\\"\\\\n>>> 解析が終了しました。Enterキーを押すとウィンドウが閉じます。<<<\"; read\""
+# ターミナルを最前面に表示
+osascript -e "tell application \"Terminal\" to activate"
+
